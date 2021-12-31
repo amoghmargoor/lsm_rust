@@ -1,8 +1,6 @@
-#[path = "./lsm_error.rs"]
-mod lsm_error;
-
 use leb128;
-use crate::block::lsm_error::DataStoreError;
+use crate::sst::lsm_error::DataStoreError;
+use crate::filesystem::Path;
 /// Block Size defined for 128 KB.
 /// TODO: need to make it configurable 
 /// and experiment to set optimal size
@@ -64,12 +62,21 @@ impl Block {
         self.finished_ = true;
         return &self.data_[0..self.current_pos_];
     }
+
+    fn write_to_sst(&self, path: &dyn Path) -> Result<(), DataStoreError> {
+        assert!(self.finished_, "Write cannot be called
+            before closing the block");
+        assert!(self.current_pos_ > 0, "Empty block cannot be written");
+        path.get_file_system().append(path, &self.data_[0..self.current_pos_])?;
+        return Ok(());
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::block::Block;
-
+    use crate::sst::block::Block;
+    use tempfile::TempDir;
+    use crate::filesystem::{Path, LocalPath};
     #[test]
     fn insert_one_key_value() {
         let mut b = Block::new();
@@ -109,5 +116,28 @@ mod tests {
         key, value].concat();
         actual_bytes = &(b.data_)[0..b.current_pos_];
         assert_eq!(expected_bytes, actual_bytes);
+    }
+
+    #[test]
+    fn test_write_to_sst() {
+        let mut b = Block::new();
+        assert!(b.add(b"key", b"value").is_ok());
+        b.finish();
+        // create sst file
+        let tmp_dir = TempDir::new().unwrap();
+        let file_path = tmp_dir.path().join("test.sst");
+        let local_path = LocalPath::from_std_path(file_path.as_path());
+        let filesystem = local_path.get_file_system();
+        assert!(filesystem.create(&local_path).is_ok());
+        assert!(b.write_to_sst(&local_path).is_ok());
+        let mut buf: [u8; 20] = [0; 20];
+        let expected_bytes =  [&[0x03 as u8, 0x05 as u8] as &[u8],
+            b"keyvalue"].concat();
+        let expected_len = expected_bytes.len();
+        let actual_len = filesystem.read(&local_path, &mut buf).unwrap();
+        assert_eq!(actual_len, expected_len,
+            "Expected len is {}, but actual len got is {}", actual_len, expected_len);
+        assert_eq!(buf[0..expected_len], expected_bytes,
+            "Bytes written to SST file differs than expected");
     }
 }

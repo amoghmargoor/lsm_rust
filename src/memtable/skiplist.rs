@@ -5,128 +5,145 @@ const MAX_HEIGHT: usize = 12;
 // Used in Random generation of height for Skiplist nodes.
 // Check the function 'RandomHeight'
 const BRANCHING: usize = 5;
+
 struct Node<Key> {
-    key: Key;
-    nodes_: &Vec<AtomicPtr<Node<Key>>>;
+    key: Key,
+    nodes_: [AtomicPtr<Node<Key>>; MAX_HEIGHT],
 }
 
-impl Node {
-    fn new(key: Key, height: usize) -> Node {
+impl<Key> Node<Key> {
+    fn new(key: Key) -> Node<Key> {
         Node {
-            key : Key,
-            nodes_: vec![AtomicPtr, height]
+            key : key,
+            nodes_: Default::default()
         }
     }
 
-    fn head() -> Node {
+    fn head(dummyKey: Key) -> Node<Key> {
         Node {
-            key : nullptr,
-            nodes_: nullptr
+            key : dummyKey,
+            nodes_: Default::default()
         }
     }
 
-    [#inline]
-    fn SetNext(level: usize, key: &Node<Key>) {
-        nodes_[level].store(AtomicPtr::new(key), Ordering::Release);
+    #[inline(always)]
+    fn SetNext(&self, level: usize, key: &mut Node<Key>) {
+        self.nodes_[level].store(key, Ordering::Release);
     }
 
-    [#inline]
-    fn SetNext_NoBarrier() {
-        nodes_[level].store(AtomicPtr::new(key), Ordering::Relaxed);
+    #[inline(always)]
+    fn SetNext_NoBarrier(&self, level: usize, key: &mut Node<Key>) {
+        self.nodes_[level].store(key, Ordering::Relaxed);
     }
 
-    [#inline]
-    fn Next(level: usize) -> &Node<Key> {
-        nodes_[level].get(Ordering::Acquire)
+    #[inline(always)]
+    fn Next(&self, level: usize) -> Option<&Node<Key>> {
+        let node = self.nodes_[level].load(Ordering::Acquire);
+        if node.is_null() {
+            return Option::None;
+        } else {
+            unsafe {
+                return Option::from(&*node);
+            }
+        }
     }
 
-    [#inline]
-    fn Next_NoBarrier(level: usize) -> &Node<Key> {
-        nodes_[level].get(Ordering::Relaxed)
+    #[inline(always)]
+    fn Next_NoBarrier(&self, level: usize) -> Option<&mut Node<Key>> {
+        let node = self.nodes_[level].load(Ordering::Relaxed);
+        if node.is_null() {
+            return Option::None;
+        } else {
+            unsafe {
+                return Option::from(&mut *node);
+            }
+        }
     }
 }
 
-struct SkipList<Key ? Ord> {
+pub struct SkipList<Key>
+where Key: std::cmp::Ord {
     head_: Node<Key>,
     max_height_: AtomicUsize
 }
 
-impl SkipList<Key> {
-    fn new() {
+impl<Key> SkipList<Key>
+where Key: std::cmp::Ord {
+    pub fn new(dummyKey: Key) -> SkipList<Key> {
         SkipList {
-            head_ : Node<Key>::head(),
+            head_ : Node::head(dummyKey),
             max_height_: AtomicUsize::new(0)
         }
     }
-    fn Insert(key: Key) {
-        let mut prev: Node[MAX_HEIGHT] = [nullptr; MAX_HEIGHT];
-        let node = FindGreaterOrEqual<true>(key, &mut prev);
-        assert(node == nullptr || !Equal(node.key, key))
-        let height = RandomHeight();
-        let max_height = max_height_.get(Ordering::Acquire)
-        if (height > max_height) {
-            for(let i = max_height; i <= MAX_HEIGHT; i++) {
-                prev[i] = head_;
-            }
-            max_height_.store(Ordering::Release);
-        }
-        x = Node::new(key, height);
-        for (let i = 0; i < height; i++) {
-            // Avoiding Barriers as we will apply Barrier
-            // in the next statement.
-            x.SetNext_NoBarrier(i, prev[i].Next_NoBarrier(i));
-            prev[i].SetNext(i, x);
-        }
-    }
-
-    fn FindGreaterOrEqual<StorePrev: bool>(key: Key, prev: &mut Node<Key>[]) -> &Node<Key> {
-        let x = head_;
-        let level = GetMaxLevel() - 1;
-        while (true) {
-            let next = x.GetNext(level);
-            if (KeyGreaterThanNode(key, next)) {
-                x = next;
-            } else {
-                if (StorePrev) {
-                    prev[level] = x;
-                }
-                if (level == 0) {
-                    return next;
-                }
-                level--;
-            }
-
-        }
-    }
-
-    [#inline]
+    #[inline(always)]
     fn Equal(a: &Key, b: &Key) -> bool { a.cmp(b) == std::cmp::Ordering::Equal }
 
-    [#inline]
-    fn KeyGreaterThanNode(key: Key, &x: Node<Key>) -> bool {
-        x != nullptr && key.cmp(x.key) == std::cmp::Ordering::Greater
-    }
-
-    [#inline]
-    fn Contains(key: Key) -> bool {
-        let node = FindGreaterOrEqual<false>(key, nullptr);
-        node != nullptr && Equal(key, node.key)
-    }
-
-    [#inline]
-    fn GetMaxLevel() -> usize {
-        max_height_.get(Ordering::Relaxed)
-    }
-
-    fn RandomHeight() ->  usize {
-        let mut height = 1;
-        while (height < MAX_HEIGHT
-            && (thread_rng().gen_range(0..BRANCHING) == 0)) {
-            height++;
+    pub fn Insert(&self, key: Key) {
+        let mut prev :[*const Node<Key>; MAX_HEIGHT] = [std::ptr::null(); MAX_HEIGHT];
+        let node = self.FindGreaterOrEqual::<true>(&key, &mut prev);
+        assert!(node.is_none() || !Self::Equal(&node.unwrap().key, &key));
+        let height = self.RandomHeight();
+        let max_height = self.max_height_.load(Ordering::Acquire);
+        if height > max_height {
+            for i in max_height..MAX_HEIGHT+1 {
+                prev[i] = &self.head_;
+            }
+            self.max_height_.store(height, Ordering::Release);
         }
-        assert(height > 0 && height <= MAX_HEIGHT);
+        let mut x = Node::new(key);
+        for i in 0..height {
+            // Avoiding Barriers as we will apply Barrier
+            // in the next statement.
+            let next_node = unsafe { (*prev[i]).Next_NoBarrier(i).unwrap() };
+            x.SetNext_NoBarrier(i, next_node);
+            unsafe {
+                (*prev[i]).SetNext(i, &mut x);
+            }
+        }
+    }
+
+    fn FindGreaterOrEqual<const StorePrev: bool>(&self, key: &Key, prev: &mut [*const Node<Key>]) -> Option<&Node<Key>> {
+        let mut x = &self.head_;
+        let mut level = self.GetMaxLevel() - 1;
+        loop {
+            let next = x.Next(level);
+            if !next.is_none() && self.KeyGreaterThanNode(key, next.unwrap()) {
+                x = next.unwrap();
+            } else {
+                if StorePrev {
+                    prev[level] = x;
+                }
+                if level == 0 {
+                    return next;
+                }
+                level -= 1;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn KeyGreaterThanNode(&self, key: &Key, x: &Node<Key>) -> bool {
+        key.cmp(&x.key) == std::cmp::Ordering::Greater
+    }
+
+    #[inline(always)]
+    pub fn Contains(&self, key: &Key) -> bool {
+        let node = self.FindGreaterOrEqual::<false>(key, Default::default());
+        node.is_some() && Self::Equal(key, &node.unwrap().key)
+    }
+
+    #[inline(always)]
+    fn GetMaxLevel(&self) -> usize {
+        self.max_height_.load(Ordering::Relaxed)
+    }
+
+    fn RandomHeight(&self) ->  usize {
+        let mut height = 1;
+        while height < MAX_HEIGHT
+            && (thread_rng().gen_range(0..BRANCHING) == 0) {
+            height = height +1;
+        }
+        assert!(height > 0 && height <= MAX_HEIGHT);
         return height;
     }
 }
-#[cfg(test)]
-mod skiplist_test;
